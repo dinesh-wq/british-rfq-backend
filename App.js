@@ -142,6 +142,19 @@ const initializeDatabase = async () => {
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
+  await pool.query(`ALTER TABLE bids ADD COLUMN IF NOT EXISTS carrier_name VARCHAR(150);`);
+  await pool.query(`ALTER TABLE bids ADD COLUMN IF NOT EXISTS freight_charges NUMERIC(12,2) DEFAULT 0;`);
+  await pool.query(`ALTER TABLE bids ADD COLUMN IF NOT EXISTS origin_charges NUMERIC(12,2) DEFAULT 0;`);
+  await pool.query(`ALTER TABLE bids ADD COLUMN IF NOT EXISTS destination_charges NUMERIC(12,2) DEFAULT 0;`);
+  await pool.query(`ALTER TABLE bids ADD COLUMN IF NOT EXISTS transit_time VARCHAR(100);`);
+  await pool.query(`ALTER TABLE bids ADD COLUMN IF NOT EXISTS quote_validity DATE;`);
+  await pool.query(`ALTER TABLE bids ADD COLUMN IF NOT EXISTS total_amount NUMERIC(12,2);`);
+  await pool.query(`UPDATE bids SET carrier_name = COALESCE(carrier_name, 'N/A') WHERE carrier_name IS NULL;`);
+  await pool.query(`UPDATE bids SET freight_charges = COALESCE(freight_charges, 0) WHERE freight_charges IS NULL;`);
+  await pool.query(`UPDATE bids SET origin_charges = COALESCE(origin_charges, 0) WHERE origin_charges IS NULL;`);
+  await pool.query(`UPDATE bids SET destination_charges = COALESCE(destination_charges, 0) WHERE destination_charges IS NULL;`);
+  await pool.query(`UPDATE bids SET transit_time = COALESCE(transit_time, 'N/A') WHERE transit_time IS NULL;`);
+  await pool.query(`UPDATE bids SET quote_validity = COALESCE(quote_validity, CURRENT_DATE) WHERE quote_validity IS NULL;`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS auction_logs (
