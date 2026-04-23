@@ -117,6 +117,7 @@ const initializeDatabase = async () => {
   await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS trigger_window_minutes INTEGER;`);
   await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS extension_duration_minutes INTEGER;`);
   await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS extension_trigger VARCHAR(40);`);
+  await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS quotation_price NUMERIC(12,2);`);
   await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';`);
   await pool.query(`UPDATE rfqs SET reference_id = COALESCE(reference_id, 'RFQ-' || id::text) WHERE reference_id IS NULL;`);
   await pool.query(`UPDATE rfqs SET forced_close_time = COALESCE(forced_close_time, bid_close_time + INTERVAL '30 minutes') WHERE forced_close_time IS NULL;`);
@@ -124,6 +125,7 @@ const initializeDatabase = async () => {
   await pool.query(`UPDATE rfqs SET trigger_window_minutes = COALESCE(trigger_window_minutes, 10) WHERE trigger_window_minutes IS NULL;`);
   await pool.query(`UPDATE rfqs SET extension_duration_minutes = COALESCE(extension_duration_minutes, 5) WHERE extension_duration_minutes IS NULL;`);
   await pool.query(`UPDATE rfqs SET extension_trigger = COALESCE(extension_trigger, 'bid_received_last_x') WHERE extension_trigger IS NULL;`);
+  await pool.query(`UPDATE rfqs SET quotation_price = COALESCE(quotation_price, 0) WHERE quotation_price IS NULL;`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS bids (
@@ -260,10 +262,11 @@ app.post('/rfq/create', authMiddleware(['buyer', 'supplier']), async (req, res) 
       trigger_window_minutes,
       extension_duration_minutes,
       extension_trigger,
+      quotation_price,
     } = req.body;
 
-    if (!rfq_name || !bid_start_time || !bid_close_time) {
-      return res.status(400).json({ message: 'RFQ Name, Bid Start, and Bid Close are required' });
+    if (!rfq_name || !bid_start_time || !bid_close_time || !quotation_price) {
+      return res.status(400).json({ message: 'RFQ Name, Bid Start, Bid Close and quotation price are required' });
     }
 
     const startTime = new Date(bid_start_time);
@@ -275,6 +278,7 @@ app.post('/rfq/create', authMiddleware(['buyer', 'supplier']), async (req, res) 
     const resolvedExtensionDuration = Number(extension_duration_minutes || 5);
     const resolvedExtensionTrigger = extension_trigger || EXTENSION_TRIGGERS.BID_RECEIVED;
     const resolvedPickupDate = pickup_service_date || new Date().toISOString().slice(0, 10);
+    const parsedQuotationPrice = Number(quotation_price);
 
     if (closeTime <= startTime) {
       return res.status(400).json({ message: 'Bid Close Date & Time must be after Bid Start Date & Time' });
@@ -285,15 +289,18 @@ app.post('/rfq/create', authMiddleware(['buyer', 'supplier']), async (req, res) 
     if (!Object.values(EXTENSION_TRIGGERS).includes(resolvedExtensionTrigger)) {
       return res.status(400).json({ message: 'Invalid extension trigger selected' });
     }
+    if (Number.isNaN(parsedQuotationPrice) || parsedQuotationPrice <= 0) {
+      return res.status(400).json({ message: 'Quotation price must be greater than 0' });
+    }
 
     const generatedReferenceId = reference_id || `RFQ-${Date.now()}`;
 
     const result = await pool.query(
       `INSERT INTO rfqs (
         rfq_name, reference_id, buyer_id, bid_start_time, bid_close_time, forced_close_time,
-        pickup_service_date, trigger_window_minutes, extension_duration_minutes, extension_trigger, status
+        pickup_service_date, trigger_window_minutes, extension_duration_minutes, extension_trigger, quotation_price, status
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active')
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'active')
       RETURNING *`,
       [
         rfq_name,
@@ -306,6 +313,7 @@ app.post('/rfq/create', authMiddleware(['buyer', 'supplier']), async (req, res) 
         resolvedTriggerWindow,
         resolvedExtensionDuration,
         resolvedExtensionTrigger,
+        parsedQuotationPrice,
       ],
     );
 
@@ -322,6 +330,7 @@ app.post('/rfq/create', authMiddleware(['buyer', 'supplier']), async (req, res) 
       reference_id: newRFQ.reference_id,
       bid_close_time: newRFQ.bid_close_time,
       forced_close_time: newRFQ.forced_close_time,
+      quotation_price: newRFQ.quotation_price,
       auction_status: getAuctionStatus(newRFQ),
       lowest_bid: 0,
     });
@@ -417,22 +426,35 @@ app.get('/rfq/:id', authMiddleware(['buyer', 'supplier']), async (req, res) => {
   }
 });
 
+app.delete('/rfq/:id', authMiddleware(['buyer']), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await pool.query(`SELECT id, buyer_id FROM rfqs WHERE id = $1`, [id]);
+    if (!existing.rows.length) {
+      return res.status(404).json({ message: 'RFQ not found' });
+    }
+    if (Number(existing.rows[0].buyer_id) !== Number(req.user.id)) {
+      return res.status(403).json({ message: 'You can delete only your own RFQs' });
+    }
+
+    await pool.query(`DELETE FROM rfqs WHERE id = $1`, [id]);
+    io.emit('rfq-updated', { rfq_id: Number(id), deleted: true });
+    return res.json({ message: 'RFQ deleted successfully' });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+});
+
 app.post('/supplier/bid', authMiddleware(['supplier']), async (req, res) => {
   const client = await pool.connect();
   try {
     const {
       rfq_id,
-      carrier_name,
-      freight_charges = 0,
-      origin_charges = 0,
-      destination_charges = 0,
-      transit_time,
-      quote_validity,
       amount,
     } = req.body;
 
-    if (!rfq_id || !carrier_name || !transit_time || !quote_validity || !amount) {
-      return res.status(400).json({ message: 'Missing bid fields' });
+    if (!rfq_id || !amount) {
+      return res.status(400).json({ message: 'RFQ and bid amount are required' });
     }
 
     await client.query('BEGIN');
@@ -461,8 +483,14 @@ app.post('/supplier/bid', authMiddleware(['supplier']), async (req, res) => {
     const previousL1Supplier = previousRankedBids[0]?.supplier_id || null;
     const lowestBid = previousRankedBids[0]?.total_amount ? Number(previousRankedBids[0].total_amount) : null;
     const numericAmount = Number(amount);
-    if (lowestBid !== null && numericAmount >= lowestBid) {
-      throw new Error('Bid amount must be lower than current lowest bid');
+    if (Number.isNaN(numericAmount) || numericAmount <= 0) {
+      throw new Error('Bid amount must be greater than 0');
+    }
+    if (Number(rfq.quotation_price || 0) > 0 && numericAmount > Number(rfq.quotation_price)) {
+      throw new Error('Bid amount cannot be greater than quotation amount');
+    }
+    if (lowestBid !== null && numericAmount > lowestBid) {
+      throw new Error('Bid amount cannot be greater than current lowest bid');
     }
 
     await client.query(
@@ -473,12 +501,12 @@ app.post('/supplier/bid', authMiddleware(['supplier']), async (req, res) => {
       [
         rfq_id,
         req.user.id,
-        carrier_name,
-        Number(freight_charges),
-        Number(origin_charges),
-        Number(destination_charges),
-        transit_time,
-        quote_validity,
+        req.user.name,
+        0,
+        0,
+        0,
+        'N/A',
+        new Date().toISOString().slice(0, 10),
         numericAmount,
       ],
     );
