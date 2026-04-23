@@ -111,6 +111,19 @@ const initializeDatabase = async () => {
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
+  await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS reference_id VARCHAR(80);`);
+  await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS forced_close_time TIMESTAMP;`);
+  await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS pickup_service_date DATE;`);
+  await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS trigger_window_minutes INTEGER;`);
+  await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS extension_duration_minutes INTEGER;`);
+  await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS extension_trigger VARCHAR(40);`);
+  await pool.query(`ALTER TABLE rfqs ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';`);
+  await pool.query(`UPDATE rfqs SET reference_id = COALESCE(reference_id, 'RFQ-' || id::text) WHERE reference_id IS NULL;`);
+  await pool.query(`UPDATE rfqs SET forced_close_time = COALESCE(forced_close_time, bid_close_time + INTERVAL '30 minutes') WHERE forced_close_time IS NULL;`);
+  await pool.query(`UPDATE rfqs SET pickup_service_date = COALESCE(pickup_service_date, CURRENT_DATE) WHERE pickup_service_date IS NULL;`);
+  await pool.query(`UPDATE rfqs SET trigger_window_minutes = COALESCE(trigger_window_minutes, 10) WHERE trigger_window_minutes IS NULL;`);
+  await pool.query(`UPDATE rfqs SET extension_duration_minutes = COALESCE(extension_duration_minutes, 5) WHERE extension_duration_minutes IS NULL;`);
+  await pool.query(`UPDATE rfqs SET extension_trigger = COALESCE(extension_trigger, 'bid_received_last_x') WHERE extension_trigger IS NULL;`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS bids (
@@ -239,29 +252,27 @@ app.post('/rfq/create', authMiddleware(['buyer', 'supplier']), async (req, res) 
       extension_trigger,
     } = req.body;
 
-    if (
-      !rfq_name ||
-      !bid_start_time ||
-      !bid_close_time ||
-      !forced_bid_close_time ||
-      !pickup_service_date ||
-      !trigger_window_minutes ||
-      !extension_duration_minutes ||
-      !extension_trigger
-    ) {
-      return res.status(400).json({ message: 'Missing required British auction fields' });
+    if (!rfq_name || !bid_start_time || !bid_close_time) {
+      return res.status(400).json({ message: 'RFQ Name, Bid Start, and Bid Close are required' });
     }
 
     const startTime = new Date(bid_start_time);
     const closeTime = new Date(bid_close_time);
-    const forcedCloseTime = new Date(forced_bid_close_time);
+    const forcedCloseTime = forced_bid_close_time
+      ? new Date(forced_bid_close_time)
+      : new Date(closeTime.getTime() + 30 * 60000);
+    const resolvedTriggerWindow = Number(trigger_window_minutes || 10);
+    const resolvedExtensionDuration = Number(extension_duration_minutes || 5);
+    const resolvedExtensionTrigger = extension_trigger || EXTENSION_TRIGGERS.BID_RECEIVED;
+    const resolvedPickupDate = pickup_service_date || new Date().toISOString().slice(0, 10);
+
     if (closeTime <= startTime) {
       return res.status(400).json({ message: 'Bid Close Date & Time must be after Bid Start Date & Time' });
     }
     if (forcedCloseTime <= closeTime) {
       return res.status(400).json({ message: 'Forced Bid Close Date & Time must be greater than Bid Close Date & Time' });
     }
-    if (!Object.values(EXTENSION_TRIGGERS).includes(extension_trigger)) {
+    if (!Object.values(EXTENSION_TRIGGERS).includes(resolvedExtensionTrigger)) {
       return res.status(400).json({ message: 'Invalid extension trigger selected' });
     }
 
@@ -281,10 +292,10 @@ app.post('/rfq/create', authMiddleware(['buyer', 'supplier']), async (req, res) 
         startTime,
         closeTime,
         forcedCloseTime,
-        pickup_service_date,
-        Number(trigger_window_minutes),
-        Number(extension_duration_minutes),
-        extension_trigger,
+        resolvedPickupDate,
+        resolvedTriggerWindow,
+        resolvedExtensionDuration,
+        resolvedExtensionTrigger,
       ],
     );
 
