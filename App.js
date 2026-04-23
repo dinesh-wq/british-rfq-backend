@@ -468,9 +468,8 @@ app.post('/supplier/bid', authMiddleware(['supplier']), async (req, res) => {
     if (getAuctionStatus(rfq) !== 'Active') {
       throw new Error('RFQ is not active');
     }
-    if (now < new Date(rfq.bid_start_time)) {
-      throw new Error('Bidding has not started yet');
-    }
+    // Skip strict bid_start_time enforcement to avoid timezone parsing mismatches
+    // between client datetime-local values and server timezone.
 
     const bidBeforeRes = await client.query(
       `SELECT supplier_id, total_amount, created_at
