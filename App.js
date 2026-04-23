@@ -150,6 +150,16 @@ const initializeDatabase = async () => {
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
+  await pool.query(`
+    ALTER TABLE auction_logs
+    DROP CONSTRAINT IF EXISTS auction_logs_event_type_check;
+  `);
+  await pool.query(`
+    ALTER TABLE auction_logs
+    ADD CONSTRAINT auction_logs_event_type_check CHECK (
+      length(trim(event_type)) > 0
+    );
+  `);
 };
 
 io.on('connection', (socket) => {
