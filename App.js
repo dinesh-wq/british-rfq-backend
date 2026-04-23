@@ -28,9 +28,12 @@ const io = new Server(server, {
 });
 
 const pool = new Pool({
-  connectionString:
-    process.env.DATABASE_URL ||
-    'postgresql://us-west-2.api.thenile.dev/v2/databases/019db60b-50a1-7466-8027-a076f50bc1df',
+  connectionString: process.env.DATABASE_URL || 'postgres://us-west-2.db.thenile.dev:5432/rfq',
+  ssl: process.env.DATABASE_URL?.includes('thenile.dev')
+    ? {
+        rejectUnauthorized: false,
+      }
+    : undefined,
 });
 
 const EXTENSION_TRIGGERS = {
