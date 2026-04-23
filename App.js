@@ -225,7 +225,7 @@ app.post('/auth/signup', async (req, res) => {
   }
 });
 
-app.post('/rfq/create', authMiddleware(['buyer']), async (req, res) => {
+app.post('/rfq/create', authMiddleware(['buyer', 'supplier']), async (req, res) => {
   try {
     const {
       rfq_name,
