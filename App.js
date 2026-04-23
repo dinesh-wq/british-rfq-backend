@@ -426,7 +426,7 @@ app.get('/rfq/:id', authMiddleware(['buyer', 'supplier']), async (req, res) => {
   }
 });
 
-app.delete('/rfq/:id', authMiddleware(['buyer']), async (req, res) => {
+app.delete('/rfq/:id', authMiddleware(['buyer', 'supplier']), async (req, res) => {
   try {
     const { id } = req.params;
     const existing = await pool.query(`SELECT id, buyer_id FROM rfqs WHERE id = $1`, [id]);
@@ -434,7 +434,7 @@ app.delete('/rfq/:id', authMiddleware(['buyer']), async (req, res) => {
       return res.status(404).json({ message: 'RFQ not found' });
     }
     if (Number(existing.rows[0].buyer_id) !== Number(req.user.id)) {
-      return res.status(403).json({ message: 'You can delete only your own RFQs' });
+      return res.status(403).json({ message: 'You can delete only RFQs created by you' });
     }
 
     await pool.query(`DELETE FROM rfqs WHERE id = $1`, [id]);
